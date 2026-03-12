@@ -1,5 +1,7 @@
 import torch
 import timm
+import os
+import pickle
 import numpy as np
 import torch.nn as nn
 from transformers import Wav2Vec2BertModel, Wav2Vec2Model, ViTForImageClassification, AutoModel
@@ -20,7 +22,7 @@ class Model(nn.Module):
             self.model = nn.Linear(1152, 6)
             self.linear = True
         else:
-            if "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim" in model_name[1]:
+            if "pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim" in model_name[1]:
                 self.audio_model = EmotionModel.from_pretrained(model_name[1])
                 self.text_model = AutoModel.from_pretrained(model_name[2],trust_remote_code=True)
                 self.task = task
@@ -43,7 +45,17 @@ class Model(nn.Module):
                                               nn.Linear(1027, 6),
                                               )
                 self.lstm_audio = nn.LSTM(1027, 1027, num_layers=2, batch_first=True, bidirectional=False)
-                self.lstm_vis = nn.LSTM(1280, 768, num_layers=2, batch_first=True, bidirectional=False)
+                # Auto-detect vision feature dim from actual pkl files
+                if os.path.exists('data/googlevit') and len(os.listdir('data/googlevit')) > 0:
+                    _vit_dir = 'data/googlevit'
+                else:
+                    _vit_dir = 'data/vit'
+                _first_pkl = os.path.join(_vit_dir, sorted(os.listdir(_vit_dir))[0])
+                with open(_first_pkl, 'rb') as _f:
+                    _sample = pickle.load(_f)
+                    vis_input_dim = _sample.shape[-1] if hasattr(_sample, 'shape') else torch.tensor(_sample).shape[-1]
+                print(f'Vision feature dir: {_vit_dir}, dim: {vis_input_dim}')
+                self.lstm_vis = nn.LSTM(vis_input_dim, 768, num_layers=2, batch_first=True, bidirectional=False)
                                
     def forward(self, audio, vision, text, length):
         if self.linear:
@@ -52,7 +64,7 @@ class Model(nn.Module):
         else:
             raw_lengths = audio['attention_mask'].sum(dim=1)  # Tensor of shape [batch_size]
             max_padded_length = 12 * 16000
-            if "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim" in self.model_name[1]:
+            if "pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim" in self.model_name[1]:
                 audio_output = self.audio_model(audio['input_values'])
                 audio_cat = torch.cat((audio_output[0], audio_output[1]), dim=2)
                 transformer_output_length = audio_cat.size(1)
@@ -81,4 +93,3 @@ class Model(nn.Module):
                     fusion_input = features[0]
                 pred = self.fusion_model(fusion_input)
                 return pred
-

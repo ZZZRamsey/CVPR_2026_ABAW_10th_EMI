@@ -28,10 +28,10 @@ class TrainingConfiguration:
     '''
 
     # Model
-    #model: tuple = ('timm/convnext_base.fb_in22k_ft_in1k', 'audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim')#'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
+    #model: tuple = ('timm/convnext_base.fb_in22k_ft_in1k', 'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim')#'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
     model: tuple = ('linear',
-                    'audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim',
-                    'Alibaba-NLP/gte-en-mlm-base')  # 'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
+                    'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim',
+                    'pretrian/gte-en-mlm-base')  # 'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
 
     # Training 
     mixed_precision: bool = True
@@ -63,13 +63,13 @@ class TrainingConfiguration:
     gradient_accumulation: int = 1
 
     # Dataset
-    data_folder = "./data/test_data/"
+    data_folder = "./data/test/"
 
     # Savepath for model checkpoints
     model_path: str = "./hume_model"
 
     # Checkpoint to start from
-    checkpoint_start = "textvitaudio_5223.pth"
+    checkpoint_start = "hume_model/('linear', 'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim', 'pretrian/gte-en-mlm-base')/105319/weights_e9_0.5091.pth"
 
     # set num_workers to 0 if on Windows
     num_workers: int = 0 if os.name == 'nt' else 4
@@ -136,7 +136,7 @@ if __name__ == '__main__':
     # -----------------------------------------------------------------------------#
 
     eval_dataset = HumeDatasetEval(data_folder=config.data_folder,
-                                   label_file='data/test_data/test_split.csv',
+                                   label_file='data/test/test_split.csv',
                                    #label_file='data/train_split.csv',
                                    model=config.model,
                                    )
@@ -158,5 +158,5 @@ if __name__ == '__main__':
     preds_df = pd.DataFrame(preds_array, columns=['Filename', 'Admiration', 'Amusement', 'Determination', 'Empathic Pain', 'Excitement', 'Joy'])
     preds_df = preds_df.sort_values(by='Filename')
     preds_df['Filename'] = preds_df['Filename'].astype(int)
-    preds_csv_path = 'preds.csv'
+    preds_csv_path = 'submission/pred2026_1.csv'
     preds_df.to_csv(preds_csv_path, index=False)

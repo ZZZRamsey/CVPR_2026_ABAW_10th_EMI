@@ -49,12 +49,22 @@ class HumeDatasetTrain(Dataset, abaw.utils.AverageMeter):
             ])
 
         if self.audio_model != 'linear':
-            if "audeering" in self.audio_model:
+            if "pretrian" in self.audio_model:
                 self.processor = AutoProcessor.from_pretrained(self.audio_model)
             else:
                 self.processor = Wav2Vec2FeatureExtractor.from_pretrained(self.audio_model)
-            self.processor_vision = AutoProcessor.from_pretrained('google/vit-base-patch16-224-in21k')
+            self.processor_vision = AutoProcessor.from_pretrained('pretrian/vit-base-patch16-224-in21k')
         self.processor_text = AutoTokenizer.from_pretrained(self.text_model)
+
+        # Auto-detect vit feature dir and dim
+        if os.path.exists(f"{self.data_folder}googlevit") and len(os.listdir(f"{self.data_folder}googlevit")) > 0:
+            self.vit_dir = "googlevit"
+        else:
+            self.vit_dir = "vit"
+        _first = sorted(os.listdir(f"{self.data_folder}{self.vit_dir}"))[0]
+        with open(f"{self.data_folder}{self.vit_dir}/{_first}", 'rb') as _f:
+            _s = pickle.load(_f)
+            self.vit_feat_dim = _s.shape[-1] if hasattr(_s, 'shape') else 768
 
     def __getitem__(self, index):
         row = self.label_file.iloc[index]
@@ -62,7 +72,7 @@ class HumeDatasetTrain(Dataset, abaw.utils.AverageMeter):
         if self.vision_model == 'linear':
             #vision = torch.randn(1024)
             try:
-                vit_file_path = f"{self.data_folder}googlevit/{str(int(row['Filename'])).zfill(5)}.pkl"
+                vit_file_path = f"{self.data_folder}{self.vit_dir}/{str(int(row['Filename'])).zfill(5)}.pkl"
                 with open(vit_file_path, 'rb') as file:
                     data = pickle.load(file)
                     if isinstance(data, torch.Tensor):
@@ -79,7 +89,8 @@ class HumeDatasetTrain(Dataset, abaw.utils.AverageMeter):
                         length = 400
             except Exception as e:
                 print(e)
-                vision = torch.randn(768)
+                vision = torch.randn(400, self.vit_feat_dim)
+                length = 1
         else:
             vision = self.process_images(index)
         
@@ -157,8 +168,11 @@ class HumeDatasetTrain(Dataset, abaw.utils.AverageMeter):
 
     def process_text(self, filename):
         text_file_path = f"{self.data_folder}text/{str(int(filename)).zfill(5)}.txt"
-        with open(text_file_path, 'r', encoding='utf-8') as file:
-            text = file.read().strip()
+        try:
+            with open(text_file_path, 'r', encoding='utf-8') as file:
+                text = file.read().strip()
+        except FileNotFoundError:
+            text = ""
         return text
 
 
@@ -204,13 +218,23 @@ class HumeDatasetEval(Dataset):
                 ToTensorV2(),
             ])
         if self.audio_model != 'linear':
-            if "audeering" in self.audio_model:
+            if "pretrian" in self.audio_model:
                 self.processor = AutoProcessor.from_pretrained(self.audio_model)
             else:
                 self.processor = Wav2Vec2FeatureExtractor.from_pretrained(self.audio_model) 
 
-            self.processor_vision = AutoProcessor.from_pretrained('google/vit-base-patch16-224-in21k')
+            self.processor_vision = AutoProcessor.from_pretrained('pretrian/vit-base-patch16-224-in21k')
         self.processor_text = AutoTokenizer.from_pretrained(self.text_model)
+
+        # Auto-detect vit feature dir and dim
+        if os.path.exists(f"{self.data_folder}googlevit") and len(os.listdir(f"{self.data_folder}googlevit")) > 0:
+            self.vit_dir = "googlevit"
+        else:
+            self.vit_dir = "vit"
+        _first = sorted(os.listdir(f"{self.data_folder}{self.vit_dir}"))[0]
+        with open(f"{self.data_folder}{self.vit_dir}/{_first}", 'rb') as _f:
+            _s = pickle.load(_f)
+            self.vit_feat_dim = _s.shape[-1] if hasattr(_s, 'shape') else 768
 
     def __getitem__(self, index):
         #row = self.label_file.iloc[int(2*len(self.label_file)/3)+index]
@@ -219,7 +243,7 @@ class HumeDatasetEval(Dataset):
         if self.vision_model == 'linear':
             #vision = torch.randn(1024)
             try:
-                vit_file_path = f"{self.data_folder}googlevit/{str(int(row['Filename'])).zfill(5)}.pkl"
+                vit_file_path = f"{self.data_folder}{self.vit_dir}/{str(int(row['Filename'])).zfill(5)}.pkl"
                 with open(vit_file_path, 'rb') as file:
                     data = pickle.load(file)
                     if isinstance(data, torch.Tensor):
@@ -236,7 +260,8 @@ class HumeDatasetEval(Dataset):
                         length = 400
 
             except Exception as e:
-                vision = torch.randn(768)
+                vision = torch.randn(400, self.vit_feat_dim)
+                length = 1
         else:
             vision = self.process_images(index)
 
@@ -299,8 +324,11 @@ class HumeDatasetEval(Dataset):
         return audio_data[:12*sr]
     def process_text(self, filename):
         text_file_path = f"{self.data_folder}text/{str(int(filename)).zfill(5)}.txt"
-        with open(text_file_path, 'r', encoding='utf-8') as file:
-            text = file.read().strip()
+        try:
+            with open(text_file_path, 'r', encoding='utf-8') as file:
+                text = file.read().strip()
+        except FileNotFoundError:
+            text = ""
         return text
 
     def __len__(self):

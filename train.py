@@ -29,17 +29,17 @@ class TrainingConfiguration:
     '''
 
     # Model
-    #model: tuple = ('timm/convnext_base.fb_in22k_ft_in1k', 'audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim')#'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
+    #model: tuple = ('timm/convnext_base.fb_in22k_ft_in1k', 'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim')#'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
     model: tuple = ('linear',
-                    'audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim',#'audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim',#'audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim')  # 'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
-                    'Alibaba-NLP/gte-en-mlm-base',)
+                    'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim',#'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim',#'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim')  # 'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
+                    'pretrian/gte-en-mlm-base',)
     # Training 
     mixed_precision: bool = True
     seed = 3407
     epochs: int = 30
     batch_size: int = 32 
     verbose: bool = True
-    gpu_ids: tuple = (0,1,2,3)#,3)  # GPU ids for training
+    gpu_ids: tuple = (0,)  # Single A800 80GB
     task: str = "text+vit+audio"
     # Eval
     batch_size_eval: int = 32
@@ -72,7 +72,7 @@ class TrainingConfiguration:
     checkpoint_start = None
 
     # set num_workers to 0 if on Windows
-    num_workers: int = 0 if os.name == 'nt' else 4
+    num_workers: int = 0 if os.name == 'nt' else 8
 
     # train on GPU if available
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -125,8 +125,8 @@ if __name__ == '__main__':
 
         # Data parallel
     print("GPUs available:", torch.cuda.device_count())
-    #if torch.cuda.device_count() > 1 and len(config.gpu_ids) > 1:
-    model = torch.nn.DataParallel(model, device_ids=config.gpu_ids)
+    if torch.cuda.device_count() > 1 and len(config.gpu_ids) > 1:
+        model = torch.nn.DataParallel(model, device_ids=config.gpu_ids)
 
     # Model to device   
     model = model.to(config.device)
