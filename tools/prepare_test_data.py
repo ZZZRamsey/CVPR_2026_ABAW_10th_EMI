@@ -8,7 +8,7 @@ from tqdm import tqdm
 def transcribe_test_audio():
     from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
-    model_id = "pretrian/whisper-large-v3-turbo"
+    model_id = "pretrained/whisper-large-v3-turbo"
     device = "cuda"
     torch_dtype = torch.float16
 
@@ -69,8 +69,8 @@ def extract_googlevit():
     os.makedirs(output_folder, exist_ok=True)
 
     device = 'cuda'
-    processor = AutoImageProcessor.from_pretrained('pretrian/vit-base-patch16-224-in21k')
-    model = AutoModel.from_pretrained('pretrian/vit-base-patch16-224-in21k').to(device)
+    processor = AutoImageProcessor.from_pretrained('pretrained/vit-base-patch16-224-in21k')
+    model = AutoModel.from_pretrained('pretrained/vit-base-patch16-224-in21k').to(device)
     model.eval()
     model.half()
 

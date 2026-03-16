@@ -1,9 +1,12 @@
 # Costom
 models/
+hume_model/
 pretrained/
 submissions/
-data/
+data
 analysis/
+.vscode/
+*.log
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

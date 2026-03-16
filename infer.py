@@ -1,162 +1,151 @@
+"""Inference script for the cleaned baseline pipeline."""
+import argparse
 import os
-import time
-import math
-import shutil
-import sys
 import torch
+import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-from torch.cuda.amp import GradScaler
+from pathlib import Path
 from torch.utils.data import DataLoader
-from abaw.abaw_dataset import HumeDatasetEval, HumeDatasetTrain
-from abaw.transforms import get_transforms_train, get_transforms_val
-from abaw.utils import setup_system, Logger
-from abaw.trainer import train
-from abaw.evaluate import evaluate
-from abaw.loss import MSE, CCC, MSECCC, CORR
-from abaw.model import Model
-from transformers import get_constant_schedule_with_warmup, get_polynomial_decay_schedule_with_warmup, \
-    get_cosine_schedule_with_warmup
-import pickle
-import numpy as np
+
+from abaw.abaw_dataset import HumeDatasetEval
+from abaw.utils import setup_system
+from abaw.evaluate import predict
+from abaw.model_ablation import ModelAblation
+
+
+AUDIO_DEFAULT = 'pretrained/wav2vec2-large-robust-12-ft-emotion-msp-dim'
+TEXT_DEFAULT = 'pretrained/gte-en-mlm-base'
+
+
+def resolve_model_name(name: str, kind: str) -> str:
+    if os.path.exists(name):
+        return name
+    if kind == 'audio' and name == AUDIO_DEFAULT:
+        return 'audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim'
+    if kind == 'text' and name == TEXT_DEFAULT:
+        return 'distilbert-base-uncased'
+    return name
 
 
 @dataclass
-class TrainingConfiguration:
-    '''
-    Describes configuration of the training process
-    '''
-
-    # Model
-    #model: tuple = ('timm/convnext_base.fb_in22k_ft_in1k', 'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim')#'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
-    model: tuple = ('linear',
-                    'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim',
-                    'pretrian/gte-en-mlm-base')  # 'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
-
-    # Training 
+class Config:
+    model: tuple = ('linear', AUDIO_DEFAULT, TEXT_DEFAULT)
     mixed_precision: bool = True
-    seed = 1
-    epochs: int = 10
-    batch_size: int = 2  # keep in mind real_batch_size = 2 * batch_size
+    seed: int = 3407
     verbose: bool = True
-    gpu_ids: tuple = (0,)  # GPU ids for training
-    task: str = "text+vit+audio"
-    mtl: bool = False
-    # Eval
+    gpu_ids: tuple = (0,)
+    task: str = 'text+vit+audio'
     batch_size_eval: int = 32
-    eval_every_n_epoch: int = 1  # eval every n Epoch
-
-    # Optimizer 
-    clip_grad = 100.  # None | float
-    decay_exclue_bias: bool = False
-    grad_checkpointing: bool = False  # Gradient Checkpointing
-
-    # Loss
-    loss: str = 'MSE'  # MSE, CCC, MSECCC choice wise
-
-    # Learning Rate
-    lr: float = 1e-4  # 1
-    # * 10^-4 for ViT | 1 * 10^-1 for CNN
-    scheduler: str = "cosine"  # "polynomial" | "cosine" | "constant" | None
-    warmup_epochs: int = 1
-    lr_end: float = 0.0001  # only for "polynomial"
-    gradient_accumulation: int = 1
-
-    # Dataset
-    data_folder = "./data/test/"
-
-    # Savepath for model checkpoints
-    model_path: str = "./hume_model"
-
-    # Checkpoint to start from
-    checkpoint_start = "hume_model/('linear', 'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim', 'pretrian/gte-en-mlm-base')/105319/weights_e9_0.5091.pth"
-
-    # set num_workers to 0 if on Windows
-    num_workers: int = 0 if os.name == 'nt' else 4
-
-    # train on GPU if available
+    mtl: bool = False
+    modality_dropout_p: float = 0.0
+    use_gate_intensity: bool = False
+    data_folder: str = './data/test/'
+    model_path: str = './hume_model'
+    num_workers: int = 0 if os.name == 'nt' else 8
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    # for better performance
     cudnn_benchmark: bool = True
-
-    # make cudnn deterministic
     cudnn_deterministic: bool = False
 
 
-# -----------------------------------------------------------------------------#
-# Train Config                                                                #
-# -----------------------------------------------------------------------------#
+def parse_args():
+    parser = argparse.ArgumentParser(description='Run inference for baseline model.')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                        help='Path to model checkpoint (.pth). If omitted, auto-find newest weights_end.pth in hume_model.')
+    parser.add_argument('--output-csv', type=str, default='submissions/pred2026_CA_all.csv',
+                        help='Prediction CSV output path.')
+    parser.add_argument('--label-file', type=str, default='data/test/test_split.csv',
+                        help='CSV file listing test sample IDs.')
+    parser.add_argument('--data-folder', type=str, default='./data/test/',
+                        help='Test data folder containing vit/googlevit, wav2vec2, and text subfolders.')
+    parser.add_argument('--batch-size-eval', type=int, default=32, help='Inference batch size.')
+    parser.add_argument('--audio-model', default=AUDIO_DEFAULT, help='Audio encoder model path or HF id.')
+    parser.add_argument('--text-model', default=TEXT_DEFAULT, help='Text encoder model path or HF id.')
+    return parser.parse_args()
 
-config = TrainingConfiguration()
 
-# %%
+def find_latest_checkpoint(model_root='hume_model'):
+    root = Path(model_root)
+    if not root.exists():
+        return None
+    candidates = list(root.glob('**/weights_end.pth'))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(candidates[0])
+
+
+config = Config()
 
 if __name__ == '__main__':
+    args = parse_args()
+    checkpoint = args.checkpoint or find_latest_checkpoint(config.model_path)
+    if checkpoint is None:
+        raise FileNotFoundError('No checkpoint found. Please pass --checkpoint or place weights_end.pth under ./hume_model.')
+    if not os.path.exists(checkpoint):
+        raise FileNotFoundError(f'Checkpoint not found: {checkpoint}')
 
-    model_path = "{}/{}/{}".format(config.model_path,
-                                   config.model,
-                                   time.strftime("%H%M%S"))
+    output_csv = args.output_csv
+    label_file = args.label_file
+    config.data_folder = args.data_folder
+    config.batch_size_eval = args.batch_size_eval
+    config.model = (
+        'linear',
+        resolve_model_name(args.audio_model, 'audio'),
+        resolve_model_name(args.text_model, 'text'),
+    )
 
-    if not os.path.exists(model_path):
-        os.makedirs(model_path)
-    shutil.copyfile(os.path.basename(__file__), "{}/train.py".format(model_path))
+    setup_system(config.seed, config.cudnn_benchmark, config.cudnn_deterministic)
+    print(f"Checkpoint : {checkpoint}")
+    print(f"Output     : {output_csv}")
+    print(f"Device     : {config.device}")
+    print(f"Audio model: {config.model[1]}")
+    print(f"Text model : {config.model[2]}")
 
-    # Redirect print to both console and log file
-    sys.stdout = Logger(os.path.join(model_path, 'log.txt'))
+    model = ModelAblation(
+        config.model,
+        config.task,
+        modality_dropout_p=0.0,
+        use_projection=False,
+        use_vision_temporal=False,
+        use_fusion_self_attn=False,
+        use_sigmoid=False,
+        use_gate_intensity=False,
+        freeze_encoders=False,
+    ).to(config.device)
 
-    setup_system(seed=config.seed,
-                 cudnn_benchmark=config.cudnn_benchmark,
-                 cudnn_deterministic=config.cudnn_deterministic)
+    state = torch.load(checkpoint, map_location=config.device)
+    model.load_state_dict(state)
+    model.eval()
+    print('Weights loaded.')
 
-    # -----------------------------------------------------------------------------#
-    # Model                                                                       #
-    # -----------------------------------------------------------------------------#
+    test_dataset = HumeDatasetEval(
+        data_folder=config.data_folder,
+        label_file=label_file,
+        model=config.model,
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config.batch_size_eval,
+        num_workers=config.num_workers,
+        shuffle=False,
+        pin_memory=True,
+        collate_fn=test_dataset.collate_fn,
+    )
+    print(f"Test samples: {len(test_dataset)}")
 
-    print("\nModel: {}".format(config.model))
+    preds, _, filenames = predict(config, model, test_loader)
+    preds_np = preds.numpy()
 
-    model = Model(config.model, config.task)
+    cols = ['Filename', 'Admiration', 'Amusement', 'Determination',
+            'Empathic Pain', 'Excitement', 'Joy']
+    df = pd.DataFrame(
+        np.hstack([np.array(filenames).reshape(-1, 1), preds_np]),
+        columns=cols,
+    )
+    df['Filename'] = df['Filename'].astype(int)
+    df = df.sort_values(by='Filename').reset_index(drop=True)
 
-    # load pretrained Checkpoint    
-    if config.checkpoint_start is not None:
-        print("Start from:", config.checkpoint_start)
-        model_state_dict = torch.load(config.checkpoint_start)
-        model.load_state_dict(model_state_dict, strict=False)
-
-        # Data parallel
-    print("GPUs available:", torch.cuda.device_count())
-    if torch.cuda.device_count() > 1 and len(config.gpu_ids) > 1:
-        model = torch.nn.DataParallel(model, device_ids=config.gpu_ids)
-
-    # Model to device   
-    model = model.to(config.device)
-
-    # -----------------------------------------------------------------------------#
-    # DataLoader                                                                  #
-    # -----------------------------------------------------------------------------#
-
-    eval_dataset = HumeDatasetEval(data_folder=config.data_folder,
-                                   label_file='data/test/test_split.csv',
-                                   #label_file='data/train_split.csv',
-                                   model=config.model,
-                                   )
-
-    eval_dataloader = DataLoader(eval_dataset,
-                                 batch_size=config.batch_size_eval,
-                                 num_workers=config.num_workers,
-                                 shuffle=False,
-                                 pin_memory=True,
-                                 collate_fn=eval_dataset.collate_fn)
-
-    print("Val Length:", len(eval_dataset))
-
-    _, preds, filenames = evaluate(config=config,
-                        model=model,
-                      eval_dataloader=eval_dataloader)
-    preds_array = preds.numpy()
-    preds_array = np.hstack([np.array(filenames).reshape(len(filenames), 1) , preds_array])
-    preds_df = pd.DataFrame(preds_array, columns=['Filename', 'Admiration', 'Amusement', 'Determination', 'Empathic Pain', 'Excitement', 'Joy'])
-    preds_df = preds_df.sort_values(by='Filename')
-    preds_df['Filename'] = preds_df['Filename'].astype(int)
-    preds_csv_path = 'submission/pred2026_1.csv'
-    preds_df.to_csv(preds_csv_path, index=False)
+    os.makedirs('submissions', exist_ok=True)
+    df.to_csv(output_csv, index=False)
+    print(f"\\nSaved {len(df)} rows  ->  {output_csv}")

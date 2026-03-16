@@ -1,3 +1,5 @@
+"""Baseline training script (train split)."""
+import argparse
 import os
 import time
 import math
@@ -8,290 +10,197 @@ from dataclasses import dataclass
 from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader
 from abaw.abaw_dataset import HumeDatasetEval, HumeDatasetTrain
-from abaw.transforms import get_transforms_train, get_transforms_val
 from abaw.utils import setup_system, Logger
 from abaw.trainer import train
 from abaw.evaluate import evaluate
-from abaw.loss import MSE, CCC, MSECCC, CORR, MTLoss
-from abaw.model import Model
-from transformers import get_constant_schedule_with_warmup, get_polynomial_decay_schedule_with_warmup, \
-    get_cosine_schedule_with_warmup
-import pickle
+from abaw.loss import MSE
+from abaw.model_ablation import ModelAblation
+from transformers import get_cosine_schedule_with_warmup
 
 
-##### Audio standard with 30 eps
+AUDIO_DEFAULT = 'pretrained/wav2vec2-large-robust-12-ft-emotion-msp-dim'
+TEXT_DEFAULT = 'pretrained/gte-en-mlm-base'
+
+
+def resolve_model_name(name: str, kind: str) -> str:
+    if os.path.exists(name):
+        return name
+    if kind == 'audio' and name == AUDIO_DEFAULT:
+        return 'audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim'
+    if kind == 'text' and name == TEXT_DEFAULT:
+        return 'distilbert-base-uncased'
+    return name
 
 
 @dataclass
-class TrainingConfiguration:
-    '''
-    Describes configuration of the training process
-    '''
-
-    # Model
-    #model: tuple = ('timm/convnext_base.fb_in22k_ft_in1k', 'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim')#'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
-    model: tuple = ('linear',
-                    'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim',#'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim',#'pretrian/wav2vec2-large-robust-12-ft-emotion-msp-dim')  # 'facebook/wav2vec2-large-960h') # ('facebook/dinov2-small', 'hf-audio/wav2vec2-bert-CV16-en') or ('linear', 'linear')
-                    'pretrian/gte-en-mlm-base',)
-    # Training 
+class Config:
+    model: tuple = ('linear', AUDIO_DEFAULT, TEXT_DEFAULT)
     mixed_precision: bool = True
-    seed = 3407
-    epochs: int = 30
-    batch_size: int = 32 
+    seed: int = 3407
+    epochs: int = 50
+    batch_size: int = 32
     verbose: bool = True
-    gpu_ids: tuple = (0,)  # Single A800 80GB
-    task: str = "text+vit+audio"
-    # Eval
+    gpu_ids: tuple = (0,)
+    task: str = 'text+vit+audio'
     batch_size_eval: int = 32
-    eval_every_n_epoch: int = 1  # eval every n Epoch
-
-    # Optimizer 
-    clip_grad = 100.  # None | float
+    eval_every_n_epoch: int = 1
+    clip_grad: float = 100.0
     decay_exclue_bias: bool = False
-    grad_checkpointing: bool = False  # Gradient Checkpointing
-
-    # Loss
-    loss: str = 'MSE'  # MSE, CCC, MSECCC choice wise
-    mtl = False
-
-    # Learning Rate
-    lr: float = 1e-4  # 1
-    # * 10^-4 for ViT | 1 * 10^-1 for CNN
-    scheduler: str = "cosine"  # "polynomial" | "cosine" | "constant" | None
-    warmup_epochs: int = 1
-    lr_end: float = 0.0001  # only for "polynomial"
+    grad_checkpointing: bool = False
     gradient_accumulation: int = 1
-
-    # Dataset
-    data_folder = "./data/"
-
-    # Savepath for model checkpoints
-    model_path: str = "./hume_model"
-
-    # Checkpoint to start from
+    loss: str = 'MSE'
+    mtl: bool = False
+    lr: float = 1e-4
+    lr_encoder: float = None
+    scheduler: str = 'cosine'
+    warmup_epochs: int = 1
+    lr_end: float = 1e-4
+    modality_dropout_p: float = 0.1
+    use_projection: bool = False
+    use_vision_temporal: bool = False
+    use_fusion_self_attn: bool = False
+    use_sigmoid: bool = False
+    use_gate_intensity: bool = False
+    freeze_encoders: bool = False
+    use_annotation_weight: bool = False
+    data_folder: str = './data/'
+    model_path: str = './hume_model'
     checkpoint_start = None
-
-    # set num_workers to 0 if on Windows
     num_workers: int = 0 if os.name == 'nt' else 8
-
-    # train on GPU if available
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    # for better performance
     cudnn_benchmark: bool = True
-
-    # make cudnn deterministic
     cudnn_deterministic: bool = False
+    patience: int = 5
 
 
-# -----------------------------------------------------------------------------#
-# Train Config                                                                #
-# -----------------------------------------------------------------------------#
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train baseline model on train split.')
+    parser.add_argument('--data-folder', default='./data/', help='Data root folder.')
+    parser.add_argument('--train-csv', default='data/train_split.csv', help='Training csv path.')
+    parser.add_argument('--val-csv', default='data/valid_split.csv', help='Validation csv path.')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs.')
+    parser.add_argument('--batch-size', type=int, default=32, help='Training batch size.')
+    parser.add_argument('--batch-size-eval', type=int, default=32, help='Evaluation batch size.')
+    parser.add_argument('--num-workers', type=int, default=None, help='Dataloader workers.')
+    parser.add_argument('--patience', type=int, default=5, help='Early stopping patience.')
+    parser.add_argument('--model-path', default='./hume_model', help='Checkpoint output directory.')
+    parser.add_argument('--exp-name', default='Baseline_CA_MSE', help='Experiment name suffix in output folder.')
+    parser.add_argument('--seed', type=int, default=3407, help='Random seed.')
+    parser.add_argument('--audio-model', default=AUDIO_DEFAULT, help='Audio encoder model path or HF id.')
+    parser.add_argument('--text-model', default=TEXT_DEFAULT, help='Text encoder model path or HF id.')
+    return parser.parse_args()
 
-config = TrainingConfiguration()
-
-# %%
 
 if __name__ == '__main__':
+    args = parse_args()
+    config = Config()
+    config.data_folder = args.data_folder
+    config.epochs = args.epochs
+    config.batch_size = args.batch_size
+    config.batch_size_eval = args.batch_size_eval
+    config.patience = args.patience
+    config.model_path = args.model_path
+    config.seed = args.seed
+    if args.num_workers is not None:
+        config.num_workers = args.num_workers
+    config.model = (
+        'linear',
+        resolve_model_name(args.audio_model, 'audio'),
+        resolve_model_name(args.text_model, 'text'),
+    )
 
-    model_path = "{}/{}/{}".format(config.model_path,
-                                   config.model,
-                                   time.strftime("%H%M%S"))
-
-    if not os.path.exists(model_path):
-        os.makedirs(model_path)
-    shutil.copyfile(os.path.basename(__file__), "{}/train.py".format(model_path))
-
-    # Redirect print to both console and log file
+    model_path = f"{config.model_path}/{time.strftime('%Y%m%d_%H%M%S')}_{args.exp_name}"
+    os.makedirs(model_path, exist_ok=True)
+    shutil.copyfile(os.path.basename(__file__), f"{model_path}/train.py")
     sys.stdout = Logger(os.path.join(model_path, 'log.txt'))
 
-    setup_system(seed=config.seed,
-                 cudnn_benchmark=config.cudnn_benchmark,
-                 cudnn_deterministic=config.cudnn_deterministic)
+    print(f"Experiment : {args.exp_name}")
+    print(f"Model path : {model_path}")
+    print(f"Audio model: {config.model[1]}")
+    print(f"Text model : {config.model[2]}")
 
-    # -----------------------------------------------------------------------------#
-    # Model                                                                       #
-    # -----------------------------------------------------------------------------#
+    setup_system(config.seed, config.cudnn_benchmark, config.cudnn_deterministic)
 
-    print("\nModel: {}".format(config.model))
+    model = ModelAblation(
+        config.model,
+        config.task,
+        modality_dropout_p=config.modality_dropout_p,
+        use_projection=config.use_projection,
+        use_vision_temporal=config.use_vision_temporal,
+        use_fusion_self_attn=config.use_fusion_self_attn,
+        use_sigmoid=config.use_sigmoid,
+        use_gate_intensity=config.use_gate_intensity,
+        freeze_encoders=config.freeze_encoders,
+    ).to(config.device)
 
-    model = Model(config.model, config.task)
+    train_dataset = HumeDatasetTrain(
+        data_folder=config.data_folder,
+        label_file=args.train_csv,
+        model=config.model,
+        use_annotation_weight=config.use_annotation_weight,
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        shuffle=True,
+        pin_memory=True,
+        collate_fn=train_dataset.collate_fn,
+    )
+    eval_dataset = HumeDatasetEval(
+        data_folder=config.data_folder,
+        label_file=args.val_csv,
+        model=config.model,
+    )
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=config.batch_size_eval,
+        num_workers=config.num_workers,
+        shuffle=False,
+        pin_memory=True,
+        collate_fn=eval_dataset.collate_fn,
+    )
+    print(f"Train: {len(train_dataset)}  Val: {len(eval_dataset)}")
 
-    # load pretrained Checkpoint    
-    if config.checkpoint_start is not None:
-        print("Start from:", config.checkpoint_start)
-        model_state_dict = torch.load(config.checkpoint_start)
-        model.load_state_dict(model_state_dict, strict=False)
+    loss_fn = MSE()
+    print(f"Loss={config.loss}")
+    scaler = GradScaler(init_scale=2.0 ** 10) if config.mixed_precision else None
 
-        # Data parallel
-    print("GPUs available:", torch.cuda.device_count())
-    if torch.cuda.device_count() > 1 and len(config.gpu_ids) > 1:
-        model = torch.nn.DataParallel(model, device_ids=config.gpu_ids)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=0.01)
+    print(f"Optim=AdamW lr={config.lr}")
 
-    # Model to device   
-    model = model.to(config.device)
+    total_steps = math.floor(len(train_loader) * config.epochs / config.gradient_accumulation)
+    warmup_steps = len(train_loader) * config.warmup_epochs
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+    )
+    print(f"Epochs={config.epochs}  patience={config.patience}\\n")
 
-    # -----------------------------------------------------------------------------#
-    # DataLoader                                                                  #
-    # -----------------------------------------------------------------------------#
-
-    # Train
-    train_dataset = HumeDatasetTrain(data_folder=config.data_folder,
-                                     label_file='data/train_split.csv',
-                                     #label_file='data/valid_split.csv',
-                                     model=config.model,
-                                     )
-
-    train_dataloader = DataLoader(train_dataset,
-                                  batch_size=config.batch_size,
-                                  num_workers=config.num_workers,
-                                  shuffle=True,
-                                  pin_memory=True,
-                                  collate_fn=train_dataset.collate_fn)
-
-    # Reference Satellite Images
-    eval_dataset = HumeDatasetEval(data_folder=config.data_folder,
-                                   label_file='data/valid_split.csv',
-                                   #label_file='data/train_split.csv',
-                                   model=config.model,
-                                   )
-
-    eval_dataloader = DataLoader(eval_dataset,
-                                 batch_size=config.batch_size_eval,
-                                 num_workers=config.num_workers,
-                                 shuffle=False,
-                                 pin_memory=True,
-                                 collate_fn=eval_dataset.collate_fn)
-
-    print("Train Length:", len(train_dataset))
-    print("Val Length:", len(eval_dataset))
-
-    # -----------------------------------------------------------------------------#
-    # Loss                                                                        #
-    # -----------------------------------------------------------------------------#
-    if config.loss == 'MSE':
-        loss_function = MSE()
-    elif config.loss == 'CCC':
-        loss_function = CCC()
-    elif config.loss == 'MSECCC':
-        loss_function = MSECCC()
-    elif config.loss == 'CORR':
-        loss_function = CORR()
-    else:
-        raise ReferenceError("Loss function does not exist.")
-
-    if config.mixed_precision:
-        scaler = GradScaler(init_scale=2. ** 10)
-    else:
-        scaler = None
-
-    # -----------------------------------------------------------------------------#
-    # optimizer                                                                   #
-    # -----------------------------------------------------------------------------#
-
-    if config.decay_exclue_bias:
-        param_optimizer = list(model.named_parameters())
-        no_decay = ["bias", "LayerNorm.bias"]
-        optimizer_parameters = [
-            {
-                "params": [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)],
-                "weight_decay": 0.01,
-            },
-            {
-                "params": [p for n, p in param_optimizer if any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-            },
-        ]
-        optimizer = torch.optim.AdamW(optimizer_parameters, lr=config.lr)
-    else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr)
-
-    # -----------------------------------------------------------------------------#
-    # Scheduler                                                                   #
-    # -----------------------------------------------------------------------------#
-
-    train_steps = math.floor((len(train_dataloader) * config.epochs) / config.gradient_accumulation)
-    warmup_steps = len(train_dataloader) * config.warmup_epochs
-
-    if config.scheduler == "polynomial":
-        print("\nScheduler: polynomial - max LR: {} - end LR: {}".format(config.lr, config.lr_end))
-        scheduler = get_polynomial_decay_schedule_with_warmup(optimizer,
-                                                              num_training_steps=train_steps,
-                                                              lr_end=config.lr_end,
-                                                              power=1.5,
-                                                              num_warmup_steps=warmup_steps)
-
-    elif config.scheduler == "cosine":
-        print("\nScheduler: cosine - max LR: {}".format(config.lr))
-        scheduler = get_cosine_schedule_with_warmup(optimizer,
-                                                    num_training_steps=train_steps,
-                                                    num_warmup_steps=warmup_steps)
-
-    elif config.scheduler == "constant":
-        print("\nScheduler: constant - max LR: {}".format(config.lr))
-        scheduler = get_constant_schedule_with_warmup(optimizer,
-                                                      num_warmup_steps=warmup_steps)
-
-    else:
-        scheduler = None
-
-    print("Warmup Epochs: {} - Warmup Steps: {}".format(str(config.warmup_epochs).ljust(2), warmup_steps))
-    print("Train Epochs:  {} - Train Steps:  {}".format(config.epochs, train_steps))
-
-    # -----------------------------------------------------------------------------#
-    # Train                                                                       #
-    # -----------------------------------------------------------------------------#
-    start_epoch = 0
-    best_score = 0
-
-    if config.mtl:
-        mtloss = MTLoss(num_task=2, loss_fn=loss_function)
-        mtloss = torch.nn.DataParallel(mtloss, device_ids=config.gpu_ids)
-        mtloss.train()
-        mtloss.to(config.device)
-        optimizer.add_param_group({'params': mtloss.parameters()})
-
+    best_score, patience_ctr = 0.0, 0
     for epoch in range(1, config.epochs + 1):
-        model.train()
-        print("\n{}[Epoch: {}]{}".format(30 * "-", epoch, 30 * "-"))
+        print(f"\\n{'-' * 30}[Epoch {epoch}]{'-' * 30}")
+        train_loss = train(config, model, train_loader, loss_fn, optimizer, scheduler, scaler)
+        print(f"Epoch {epoch}  Train Loss={train_loss:.4f}  Lr={optimizer.param_groups[0]['lr']:.6f}")
 
-        train_loss = train(config,
-                           model,
-                           dataloader=train_dataloader,
-                           loss_function=mtloss if config.mtl else loss_function,
-                           optimizer=optimizer,
-                           scheduler=scheduler,
-                           scaler=scaler)
+        corr, _, _ = evaluate(config, model, eval_loader)
+        score = float(corr)
+        if math.isnan(score):
+            score = 0.0
 
-        print("Epoch: {}, Train Loss = {:.3f}, Lr = {:.6f}".format(epoch,
-                                                                   train_loss,
-                                                                   optimizer.param_groups[0]['lr']))
-
-        # evaluate
-        if (epoch % config.eval_every_n_epoch == 0 and epoch != 0) or epoch == config.epochs:
-            model.eval()
-            print("\n{}[{}]{}".format(30 * "-", "Evaluate", 30 * "-"))
-
-            p1, _, _ = evaluate(config=config,
-                          model=model,
-                          eval_dataloader=eval_dataloader,
-                          weight=mtloss.module.weight if config.mtl else None)
-
-            if p1 > best_score:
-
-                best_score = p1
-
-                if torch.cuda.device_count() > 1 and len(config.gpu_ids) > 1:
-                    torch.save(model.module.state_dict(), '{}/weights_e{}_{:.4f}.pth'.format(model_path, epoch, p1))
-                else:
-                    torch.save(model.state_dict(), '{}/weights_e{}_{:.4f}.pth'.format(model_path, epoch, p1))
-            print("Epoch: {}, Eval Pearson = {:.3f},".format(epoch, p1))
-        if torch.cuda.device_count() > 1 and len(config.gpu_ids) > 1:
-            torch.save(model.module.state_dict(), '{}/weights_e{}_{:.4f}.pth'.format(model_path, epoch, p1))
+        if score > best_score:
+            best_score = score
+            patience_ctr = 0
+            torch.save(model.state_dict(), f"{model_path}/weights_best.pth")
         else:
-            torch.save(model.state_dict(), '{}/weights_e{}_{:.4f}.pth'.format(model_path, epoch, p1))
+            patience_ctr += 1
 
-    if torch.cuda.device_count() > 1 and len(config.gpu_ids) > 1:
-        torch.save(model.module.state_dict(), '{}/weights_end.pth'.format(model_path))
-    else:
-        torch.save(model.state_dict(), '{}/weights_end.pth'.format(model_path))
+        print(f"Epoch {epoch}  Eval Pearson={score:.4f}  Best={best_score:.4f}  Patience={patience_ctr}/{config.patience}")
+        torch.save(model.state_dict(), f"{model_path}/weights_e{epoch}_{score:.4f}.pth")
+        if patience_ctr >= config.patience:
+            print(f"\\n*** Early stopping at epoch {epoch} ***")
+            break
+
+    torch.save(model.state_dict(), f"{model_path}/weights_end.pth")
+    print(f"\\nTraining complete.  Best Eval Pearson = {best_score:.4f}")
