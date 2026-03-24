@@ -1,4 +1,4 @@
-# Solution for the EMI Track (CVPR 2026 ABAW Challenge) from USTC 
+# :trophy: Champion Solution for the EMI Track (CVPR 2026 ABAW Challenge) from USTC 
 
 Entrypoints:
 - train.py: training on train split
